@@ -1,0 +1,15 @@
+[Unit]
+Description=Future Scan (Binance -> Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/future_scan
+ExecStart=/home/ubuntu/future_scan/scripts/run_server.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
