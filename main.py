@@ -12,6 +12,7 @@ from playwright.sync_api import sync_playwright
 TICKER_24H_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 DEFAULT_OUTPUT_DIR = "captures"
 DISCOVERY_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+DEFAULT_VOLATILE_LIST_LIMIT = 20
 
 
 def get_most_volatile_coin():
@@ -169,7 +170,7 @@ def wait_for_coin_list_header(page, timeout_ms=7000):
     return False
 
 
-def collect_max_coin_list(page, max_items=600):
+def collect_max_coin_list(page, max_items=DEFAULT_VOLATILE_LIST_LIMIT):
     rows = page.evaluate(
         r"""
         async ({ maxItems }) => {
@@ -422,7 +423,7 @@ def discover_volatile_coin_list(page, seed_symbol):
             if not sorted_ok:
                 raise RuntimeError("Could not click 24h Chg to sort descending.")
 
-            rows = collect_max_coin_list(page)
+            rows = collect_max_coin_list(page, max_items=DEFAULT_VOLATILE_LIST_LIMIT)
             if not rows:
                 raise RuntimeError("No volatile coin rows extracted from list.")
 
@@ -641,8 +642,8 @@ def parse_args():
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=10,
-        help="Interval minutes for loop mode. Default: 10",
+        default=DEFAULT_VOLATILE_LIST_LIMIT,
+        help="Maximum volatile-list coins to capture. Default: 20",
     )
     parser.add_argument(
         "--skip-telegram",
