@@ -23,6 +23,7 @@ Auto workflow for Binance Futures on Ubuntu:
 - `.env.example`: environment variable template.
 - `scripts/install_ubuntu.sh`: one-shot Ubuntu installation script.
 - `scripts/run_server.sh`: start script (loads `.env`, runs app).
+- `scripts/daemon.sh`: detached background runner (survives SSH logout).
 - `systemd/future-scan.service`: sample service unit.
 
 ## Quick start on Ubuntu (pull and run)
@@ -63,6 +64,26 @@ Optional:
 ```
 
 That is enough to run from one repo on Ubuntu.
+
+## Run in background (keep running after SSH logout)
+
+Use the daemon helper script:
+
+```bash
+chmod +x scripts/daemon.sh scripts/run_server.sh scripts/install_ubuntu.sh
+./scripts/daemon.sh start
+```
+
+Useful commands:
+
+```bash
+./scripts/daemon.sh status
+./scripts/daemon.sh logs
+./scripts/daemon.sh stop
+./scripts/daemon.sh restart
+```
+
+The process runs with `nohup` and keeps running after you close SSH.
 
 ## Command modes
 
