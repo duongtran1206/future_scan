@@ -2,6 +2,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import traceback
 import time
 from pathlib import Path
 
@@ -292,12 +293,48 @@ def save_coin_list(rows, output_dir):
     return out_path
 
 
+def _telegram_api_url(bot_token):
+    return f"https://api.telegram.org/bot{bot_token}"
+
+
+def send_telegram_text(bot_token, chat_id, message):
+    """Send a plain-text message to Telegram. Non-fatal on failure."""
+    if not bot_token or not chat_id:
+        return
+
+    try:
+        url = f"{_telegram_api_url(bot_token)}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        response = requests.post(url, json=payload, timeout=30)
+        if not response.ok:
+            print(f"Telegram text send failed: HTTP {response.status_code} {response.text}")
+    except Exception as exc:
+        print(f"Telegram text send exception: {exc}")
+
+
+def notify_telegram_error(bot_token, chat_id, context, error):
+    """Send an error report to Telegram with timestamp and context."""
+    now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tb_lines = traceback.format_exception(type(error), error, error.__traceback__)
+    tb_short = "".join(tb_lines[-3:]) if len(tb_lines) > 3 else "".join(tb_lines)
+    msg = (
+        f"<b>⚠️ future_scan Error</b>\n"
+        f"<b>Time:</b> {now_str}\n"
+        f"<b>Context:</b> {context}\n"
+        f"<b>Error:</b> <code>{error}</code>\n"
+        f"<pre>{tb_short[:800]}</pre>"
+    )
+    send_telegram_text(bot_token, chat_id, msg)
+
+
 def send_images_to_telegram(image_paths, coin_rows, bot_token, chat_id):
     if not bot_token or not chat_id:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID for Telegram sending.")
 
     chg_map = {row.get("symbol", ""): row.get("chgText", "") for row in coin_rows}
     total = len(image_paths)
+    sent = 0
+    failed = []
     for idx, image_path in enumerate(image_paths, start=1):
         symbol = image_path.stem
         chg_text = chg_map.get(symbol, "")
@@ -305,18 +342,32 @@ def send_images_to_telegram(image_paths, coin_rows, bot_token, chat_id):
         if chg_text:
             caption += f" | 24h Chg: {chg_text}"
 
-        url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-        with image_path.open("rb") as image_file:
-            files = {"photo": image_file}
-            data = {"chat_id": chat_id, "caption": caption}
-            response = requests.post(url, data=data, files=files, timeout=60)
+        url = f"{_telegram_api_url(bot_token)}/sendPhoto"
+        try:
+            with image_path.open("rb") as image_file:
+                files = {"photo": image_file}
+                data = {"chat_id": chat_id, "caption": caption}
+                response = requests.post(url, data=data, files=files, timeout=60)
 
-        if not response.ok:
-            raise RuntimeError(
-                f"Telegram send failed for {symbol}: HTTP {response.status_code} {response.text}"
-            )
+            if not response.ok:
+                failed.append(f"{symbol}: HTTP {response.status_code} {response.text[:200]}")
+                print(f"Telegram send failed for {symbol}: HTTP {response.status_code}")
+                continue
 
-        print(f"Telegram sent [{idx}/{total}]: {image_path.name}")
+            sent += 1
+            print(f"Telegram sent [{idx}/{total}]: {image_path.name}")
+        except Exception as exc:
+            failed.append(f"{symbol}: {exc}")
+            print(f"Telegram send exception for {symbol}: {exc}")
+
+    if failed:
+        notify_telegram_error(
+            bot_token, chat_id,
+            f"send_images_to_telegram ({sent}/{total} sent, {len(failed)} failed)",
+            Exception("; ".join(failed)),
+        )
+
+    return sent, failed
 
 
 def delete_files(file_paths):
@@ -507,13 +558,21 @@ def run_cycle(
     bot_token=None,
     chat_id=None,
 ):
-    image_paths, coin_rows = run_once(output_dir=output_dir, headless=headless, max_coins=max_coins)
+    try:
+        image_paths, coin_rows = run_once(output_dir=output_dir, headless=headless, max_coins=max_coins)
+    except Exception as exc:
+        notify_telegram_error(bot_token, chat_id, "run_once (discovery + capture)", exc)
+        raise
 
-    if send_telegram:
-        send_images_to_telegram(image_paths, coin_rows, bot_token=bot_token, chat_id=chat_id)
-
-    if cleanup_images:
-        delete_files(image_paths)
+    try:
+        if send_telegram:
+            send_images_to_telegram(image_paths, coin_rows, bot_token=bot_token, chat_id=chat_id)
+    except Exception as exc:
+        notify_telegram_error(bot_token, chat_id, "send_images_to_telegram", exc)
+        raise
+    finally:
+        if cleanup_images:
+            delete_files(image_paths)
 
 
 def seconds_until_next_run(target_hhmm):
@@ -564,6 +623,7 @@ def run_daily(
                 chat_id=chat_id,
             )
         except Exception as exc:  # Keep daily loop alive even if one run fails.
+            notify_telegram_error(bot_token, chat_id, "run_daily cycle", exc)
             print(f"Run failed: {exc}")
 
 
@@ -596,6 +656,7 @@ def run_interval(
             )
             print("Cycle done.")
         except Exception as exc:
+            notify_telegram_error(bot_token, chat_id, f"run_interval ({interval_minutes}m cycle)", exc)
             print(f"Cycle failed: {exc}")
 
         next_at = dt.datetime.now() + dt.timedelta(minutes=interval_minutes)
