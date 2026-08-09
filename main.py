@@ -73,33 +73,76 @@ def sort_coin_list_desc_by_24h_change(page):
     if headers.count() == 0:
         return False
 
-    def read_first_changes():
-        rows = page.eval_on_selector_all(
-            "a[href*='/en/futures/']",
+    def read_panel_changes():
+        return page.evaluate(
             r"""
-            (nodes) => nodes
-                .map((n) => (n.innerText || '').replace(/\s+/g, ' ').trim())
-                .filter((t) => /USDT/.test(t) && /%/.test(t))
-                .map((t) => {
-                    const m = t.match(/([+-]?\d+(?:\.\d+)?)%/);
-                    return m ? Number(m[1]) : null;
-                })
-                .filter((v) => v !== null)
-                .slice(0, 5)
-            """,
+            () => {
+                const headerNode = Array.from(document.querySelectorAll('*')).find(
+                    (el) => (el.textContent || '').trim() === '24h Chg'
+                );
+                if (!headerNode) return [];
+
+                let root = document;
+                let p = headerNode;
+                while (p) {
+                    const linksInNode = p.querySelectorAll?.("a[href*='/en/futures/']")?.length || 0;
+                    if (linksInNode >= 10) { root = p; break; }
+                    p = p.parentElement;
+                }
+
+                const links = Array.from(root.querySelectorAll("a[href*='/en/futures/']"));
+                const values = [];
+                for (const link of links) {
+                    const text = (link.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (!/USDT/.test(text) || !/%/.test(text)) continue;
+                    const m = text.match(/([+-]?\d+(?:\.\d+)?)%/);
+                    if (m) values.push(Number(m[1]));
+                    if (values.length >= 10) break;
+                }
+                return values;
+            }
+            """
         )
-        return rows
 
-    # Click the most likely visible header first, then validate descending values.
-    for i in range(min(headers.count(), 3)):
-        try:
-            headers.nth(i).click(timeout=5000)
-        except PlaywrightError:
-            continue
+    def is_descending(values):
+        if len(values) < 2:
+            return False
+        descending_count = sum(
+            1 for i in range(len(values) - 1) if values[i] >= values[i + 1]
+        )
+        return descending_count >= len(values) * 0.7 and values[0] > values[-1]
 
-        page.wait_for_timeout(700)
-        values = read_first_changes()
-        if len(values) >= 2 and values[0] >= values[1]:
+    # Try up to 5 clicks: first click activates sort, second toggles asc/desc, etc.
+    for _ in range(5):
+        clicked = False
+        for i in range(min(headers.count(), 3)):
+            try:
+                headers.nth(i).click(timeout=5000)
+                clicked = True
+                break
+            except PlaywrightError:
+                continue
+
+        if not clicked:
+            try:
+                page.evaluate(
+                    """
+                    () => {
+                        const el = Array.from(document.querySelectorAll('*')).find(
+                            (el) => (el.textContent || '').trim() === '24h Chg'
+                        );
+                        if (el) { el.click(); return true; }
+                        return false;
+                    }
+                    """
+                )
+            except PlaywrightError:
+                pass
+
+        page.wait_for_timeout(1200)
+        values = read_panel_changes()
+        if is_descending(values):
+            print(f"Sort confirmed: top values={values[:5]}")
             return True
 
     return False
