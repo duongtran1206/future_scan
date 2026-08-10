@@ -14,6 +14,7 @@ TICKER_24H_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 DEFAULT_OUTPUT_DIR = "captures"
 DISCOVERY_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 DEFAULT_VOLATILE_LIST_LIMIT = 20
+TELEGRAM_STATE_FILE = Path("run") / "telegram_messages.json"
 
 
 def get_most_volatile_coin():
@@ -340,19 +341,93 @@ def _telegram_api_url(bot_token):
     return f"https://api.telegram.org/bot{bot_token}"
 
 
-def send_telegram_text(bot_token, chat_id, message):
-    """Send a plain-text message to Telegram. Non-fatal on failure."""
+def load_sent_message_ids():
+    """Load message IDs previously sent by the bot from the state file."""
+    try:
+        if TELEGRAM_STATE_FILE.exists():
+            data = json.loads(TELEGRAM_STATE_FILE.read_text(encoding="utf-8"))
+            return data.get("message_ids", [])
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def save_sent_message_ids(message_ids):
+    """Persist the list of bot-sent message IDs to the state file."""
+    try:
+        TELEGRAM_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "count": len(message_ids),
+            "message_ids": message_ids,
+        }
+        TELEGRAM_STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"Warning: could not save telegram message state: {exc}")
+
+
+def add_sent_message_id(message_id):
+    """Record a message ID so it can be cleaned up in a later cycle."""
+    if not message_id:
+        return
+    ids = load_sent_message_ids()
+    if message_id not in ids:
+        ids.append(message_id)
+        save_sent_message_ids(ids)
+
+
+def clear_previous_telegram_messages(bot_token, chat_id):
+    """Delete all messages the bot sent previously (keeps the chat clean)."""
     if not bot_token or not chat_id:
         return
 
+    ids = load_sent_message_ids()
+    if not ids:
+        return
+
+    remaining = []
+    deleted = 0
+    for message_id in ids:
+        try:
+            url = f"{_telegram_api_url(bot_token)}/deleteMessage"
+            response = requests.post(
+                url,
+                json={"chat_id": chat_id, "message_id": message_id},
+                timeout=20,
+            )
+            if response.ok:
+                deleted += 1
+            else:
+                remaining.append(message_id)
+        except Exception as exc:
+            print(f"Telegram delete failed for message {message_id}: {exc}")
+            remaining.append(message_id)
+
+    save_sent_message_ids(remaining)
+    print(
+        f"Cleared previous Telegram messages: deleted={deleted}, remaining={len(remaining)}"
+    )
+
+
+def send_telegram_text(bot_token, chat_id, message):
+    """Send a plain-text message to Telegram. Non-fatal on failure."""
+    if not bot_token or not chat_id:
+        return None
+
+    message_id = None
     try:
         url = f"{_telegram_api_url(bot_token)}/sendMessage"
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
         response = requests.post(url, json=payload, timeout=30)
-        if not response.ok:
+        if response.ok:
+            message_id = response.json().get("result", {}).get("message_id")
+            add_sent_message_id(message_id)
+        else:
             print(f"Telegram text send failed: HTTP {response.status_code} {response.text}")
     except Exception as exc:
         print(f"Telegram text send exception: {exc}")
+
+    return message_id
 
 
 def notify_telegram_error(bot_token, chat_id, context, error):
@@ -397,6 +472,8 @@ def send_images_to_telegram(image_paths, coin_rows, bot_token, chat_id):
                 print(f"Telegram send failed for {symbol}: HTTP {response.status_code}")
                 continue
 
+            message_id = response.json().get("result", {}).get("message_id")
+            add_sent_message_id(message_id)
             sent += 1
             print(f"Telegram sent [{idx}/{total}]: {image_path.name}")
         except Exception as exc:
@@ -601,6 +678,9 @@ def run_cycle(
     bot_token=None,
     chat_id=None,
 ):
+    if send_telegram:
+        clear_previous_telegram_messages(bot_token, chat_id)
+
     try:
         image_paths, coin_rows = run_once(output_dir=output_dir, headless=headless, max_coins=max_coins)
     except Exception as exc:
@@ -746,8 +826,8 @@ def parse_args():
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=DEFAULT_VOLATILE_LIST_LIMIT,
-        help="Maximum volatile-list coins to capture. Default: 20",
+        default=10,
+        help="Run every N minutes in interval mode. Default: 10",
     )
     parser.add_argument(
         "--skip-telegram",
